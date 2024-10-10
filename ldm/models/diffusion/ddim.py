@@ -79,7 +79,7 @@ class DDIMSampler(object):
                ):
         if conditioning is not None:
             if isinstance(conditioning, dict):
-                cbs = conditioning[list(conditioning.keys())[0]].shape[0]
+                cbs = len(conditioning[list(conditioning.keys())[0]][0])
                 if cbs != batch_size:
                     print(f"Warning: Got {cbs} conditionings but batch-size is {batch_size}")
             else:
@@ -172,9 +172,33 @@ class DDIMSampler(object):
         else:
             x_in = torch.cat([x] * 2)
             t_in = torch.cat([t] * 2)
-            c_in = torch.cat([unconditional_conditioning, c])
+            c_in = dict()
+
+            if(isinstance(c, dict)):
+                #it is hybrid
+                #concat the inner tensors to be passed since hybrid has multiple conds keys
+
+                #iterates over each key available and concats them in the batch dim.
+                c_in = {
+
+                    key: torch.cat([unconditional_conditioning[key], c[key]])  for key in c.keys()
+                }
+  
+                # c_in['c_concat'] = torch.cat([unconditional_conditioning['c_concat'], c['c_concat']], dim=0)
+                # c_in['c_crossattn'] = torch.cat([unconditional_conditioning['c_crossattn'], c['c_crossattn']])
+                
+
+
+            else: #its just a single encoded string
+                c_in = torch.cat([unconditional_conditioning, c])
+
+            # print("shapes")
+            # print(x_in.shape)
+            # print(c_in['c_crossattn'].shape)
+            # print(c_in['c_concat'].shape)
             e_t_uncond, e_t = self.model.apply_model(x_in, t_in, c_in).chunk(2)
             e_t = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
+            e_t = e_t
 
         if score_corrector is not None:
             assert self.model.parameterization == "eps"
