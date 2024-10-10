@@ -84,6 +84,7 @@ class DDPM(pl.LightningModule):
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
         self.model = DiffusionWrapper(unet_config, conditioning_key)
+        if conditioning_key == 'hybrid': print(f"\U0001F9EA Running {conditioning_key}")
         count_params(self.model, verbose=True)
         self.use_ema = use_ema
         if self.use_ema:
@@ -277,6 +278,7 @@ class DDPM(pl.LightningModule):
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
 
     def get_loss(self, pred, target, mean=True):
+
         if self.loss_type == 'l1':
             loss = (target - pred).abs()
             if mean:
@@ -434,6 +436,7 @@ class LatentDiffusion(DDPM):
                  conditioning_key=None,
                  scale_factor=1.0,
                  scale_by_std=False,
+                 hybrid_key=None, #for csllm
                  *args, **kwargs):
         self.num_timesteps_cond = default(num_timesteps_cond, 1)
         self.scale_by_std = scale_by_std
@@ -449,6 +452,8 @@ class LatentDiffusion(DDPM):
         self.concat_mode = concat_mode
         self.cond_stage_trainable = cond_stage_trainable
         self.cond_stage_key = cond_stage_key
+        self.hybrid_key = hybrid_key #key for hybrid conditioning
+        # assert hybrid_key, conditioning_key in ['c_concat', 'caption', 'class_label', None] #only combinations that will work
         try:
             self.num_downs = len(first_stage_config.params.ddconfig.ch_mult) - 1
         except:
@@ -551,7 +556,12 @@ class LatentDiffusion(DDPM):
     def get_learned_conditioning(self, c):
         if self.cond_stage_forward is None:
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
-                c = self.cond_stage_model.encode(c)
+                #If hybrid, recreate the condition dict
+                if isinstance(c, dict):
+                    enc_c = self.cond_stage_model.encode(c['c_crossattn'])
+                    c['c_crossattn'] = enc_c #update encoded cond to the cond dict.
+                else:
+                    c = self.cond_stage_model.encode(c) #used in bert tokenizer
                 if isinstance(c, DiagonalGaussianDistribution):
                     c = c.mode()
             else:
@@ -651,8 +661,37 @@ class LatentDiffusion(DDPM):
         return fold, unfold, normalization, weighting
 
     @torch.no_grad()
+    def enc_concat_seq(self, c: dict, batch, k) -> dict:
+        """
+        encodes a sequence of images from a batch for conditioning. used with c_concat and hybrid conditioning.
+        Returns:
+            dict: condition dictionary.
+        """
+
+        image_sequence = torch.as_tensor(batch[k])
+        enc_sequence = []
+
+        if len(image_sequence.shape) == 4:
+            image_sequence = image_sequence.unsqueeze(0) #add batch dimension of missing
+
+        input = rearrange(image_sequence, 'b l h w c -> l b c h w')
+
+        #we need to encode each image in the sequence l before concat.
+        for img in input:
+            img = img.to(self.device) # b c h w
+
+            img = img.to(memory_format=torch.contiguous_format).float()
+            img = self.encode_first_stage(img)
+            enc_sequence.append(img)
+
+        c[k] = torch.cat(enc_sequence, dim=1) #concat all the latents together on the channel dim
+        return c
+
+        
+    @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, bs=None):
+
         x = super().get_input(batch, k)
         if bs is not None:
             x = x[:bs]
@@ -666,6 +705,7 @@ class LatentDiffusion(DDPM):
             if cond_key != self.first_stage_key:
                 if cond_key in ['caption', 'coordinates_bbox']:
                     xc = batch[cond_key]
+
                 elif cond_key == 'class_label':
                     xc = batch
                 else:
@@ -694,6 +734,16 @@ class LatentDiffusion(DDPM):
             if self.use_positional_encodings:
                 pos_x, pos_y = self.compute_latent_shifts(batch)
                 c = {'pos_x': pos_x, 'pos_y': pos_y}
+
+        #This is for concat + cross attention conditioning only, indicated with a hybrid key.
+        if self.hybrid_key == 'c_concat':
+            hkey = self.hybrid_key
+
+            c = {'c_crossattn': batch[cond_key]} #cond_key is converted to cross attention.
+            #return the dict of conds with cattn for the learnable cond. and cconcat for latent cond.
+            c = self.enc_concat_seq(c, batch, hkey)
+
+
         out = [z, c]
         if return_first_stage_outputs:
             xrec = self.decode_first_stage(z)
@@ -891,10 +941,12 @@ class LatentDiffusion(DDPM):
     def apply_model(self, x_noisy, t, cond, return_ids=False):
 
         if isinstance(cond, dict):
-            # hybrid case, cond is exptected to be a dict
+            # hybrid case, cond is exptected to be a dict <---------------
+            # print("its hybrid!!!!!")
             pass
         else:
             if not isinstance(cond, list):
+                # print("AHAH GOT U")
                 cond = [cond]
             key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
             cond = {key: cond}
@@ -984,6 +1036,7 @@ class LatentDiffusion(DDPM):
             x_recon = fold(o) / normalization
 
         else:
+            #This is where we concat the noisy latents with the cond images.
             x_recon = self.model(x_noisy, t, **cond)
 
         if isinstance(x_recon, tuple) and not return_ids:
@@ -1010,8 +1063,9 @@ class LatentDiffusion(DDPM):
         return mean_flat(kl_prior) / np.log(2.0)
 
     def p_losses(self, x_start, cond, t, noise=None):
+        # print("p losses calledGHGHJGJHGJHGJHGJHGJHGJHGJHGJHGJHG")
         noise = default(noise, lambda: torch.randn_like(x_start))
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise) 
         model_output = self.apply_model(x_noisy, t, cond)
 
         loss_dict = {}
@@ -1027,7 +1081,8 @@ class LatentDiffusion(DDPM):
         loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
-        logvar_t = self.logvar[t].to(self.device)
+        #move t to cpu with logvar
+        logvar_t = self.logvar[t.to(self.logvar.device)].to(self.device)
         loss = loss_simple / torch.exp(logvar_t) + logvar_t
         # loss = loss_simple / torch.exp(self.logvar) + self.logvar
         if self.learn_logvar:
@@ -1358,6 +1413,56 @@ class LatentDiffusion(DDPM):
                 return {key: log[key] for key in return_keys}
         return log
 
+    def initialize_weights_diffusion_model(self):
+        """
+        Apply the weight initialization to all modules in the diffusion model.
+        """
+        for module in self.model.diffusion_model.modules():
+            self.init_weights_module(module)
+    
+    def init_weights_module(self, module):
+        """
+        Custom weight initializer for modules.
+        Args:
+            module: A module to initialize.
+        """
+        if isinstance(module, nn.Conv2d):
+            # Kaiming initialization for Conv2d layers
+            nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)  # Initialize biases to zero
+
+        elif isinstance(module, nn.Linear):
+            # Xavier initialization for Linear layers
+            nn.init.xavier_normal_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)  # Initialize biases to zero
+
+        elif isinstance(module, (nn.BatchNorm2d, nn.GroupNorm)):
+            # Initialize BatchNorm or GroupNorm layers
+            nn.init.ones_(module.weight)  # Set weight to 1
+            nn.init.zeros_(module.bias)   # Set bias to 0
+
+        elif isinstance(module, nn.LayerNorm):
+            # Initialize LayerNorm layers
+            nn.init.ones_(module.weight)  # Set weight to 1
+            nn.init.zeros_(module.bias)   # Set bias to 0
+
+        elif isinstance(module, nn.Embedding):
+            # Initialize embeddings
+            nn.init.normal_(module.weight, mean=0, std=0.01)  # Example initialization for embeddings
+
+        elif isinstance(module, nn.Dropout):
+            # Dropout layers do not need initialization
+            pass
+
+        # Recursively initialize weights for custom layers like ResBlock and SpatialTransformer
+        elif hasattr(module, 'weight') and hasattr(module, 'bias'):
+            if module.weight is not None:
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+
     def configure_optimizers(self):
         lr = self.learning_rate
         params = list(self.model.parameters())
@@ -1406,11 +1511,24 @@ class DiffusionWrapper(pl.LightningModule):
             xc = torch.cat([x] + c_concat, dim=1)
             out = self.diffusion_model(xc, t)
         elif self.conditioning_key == 'crossattn':
+            # print('cattnCCC')
+            # print(len(c_crossattn))
+            # print(len(c_crossattn[0]))
+            # print(len(c_crossattn[0][0]))
             cc = torch.cat(c_crossattn, 1)
+            # print('cattnaaaa', cc.shape)
             out = self.diffusion_model(x, t, context=cc)
         elif self.conditioning_key == 'hybrid':
-            xc = torch.cat([x] + c_concat, dim=1)
-            cc = torch.cat(c_crossattn, 1)
+            # print("hgybrid forward")
+            # print(x.shape)
+            # print(c_concat[0].shape)
+            # print(c_concat.shape)
+            xc = torch.cat([x, c_concat], dim=1)
+            # print("HYBRID CALLED", xc.shape)
+            # print(c_crossattn[0].shape)
+            # print(c_crossattn.__class__)
+            cc = torch.tensor(c_crossattn) # torch.cat(c_crossattn, 1)
+            # print("yeye ", cc.shape)
             out = self.diffusion_model(xc, t, context=cc)
         elif self.conditioning_key == 'adm':
             cc = c_crossattn[0]
