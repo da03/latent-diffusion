@@ -1527,7 +1527,7 @@ class DiffusionWrapper(pl.LightningModule):
             # print("HYBRID CALLED", xc.shape)
             # print(c_crossattn[0].shape)
             # print(c_crossattn.__class__)
-            cc = torch.tensor(c_crossattn) # torch.cat(c_crossattn, 1)
+            cc = c_crossattn #torch.tensor(c_crossattn) # torch.cat(c_crossattn, 1)
             # print("yeye ", cc.shape)
             out = self.diffusion_model(xc, t, context=cc)
         elif self.conditioning_key == 'adm':
