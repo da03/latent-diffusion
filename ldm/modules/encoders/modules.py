@@ -6,7 +6,7 @@ from einops import rearrange, repeat
 import kornia
 
 
-from ldm.modules.x_transformer import Encoder, TransformerWrapper  # TODO: can we directly rely on lucidrains code and simply add this as a reuirement? --> test
+from latent_diffusion.ldm.modules.x_transformer import Encoder, TransformerWrapper  # TODO: can we directly rely on lucidrains code and simply add this as a reuirement? --> test
 
 
 class AbstractEncoder(nn.Module):
@@ -28,6 +28,9 @@ class ClassEmbedder(nn.Module):
         if key is None:
             key = self.key
         # this is for use in crossattn
+        # print("WE CLOSE", batch)
+        # print('key', key)
+        # print('dddddddd', batch['class_label'])
         c = batch[key][:, None]
         c = self.embedding(c)
         return c
@@ -61,6 +64,7 @@ class BERTTokenizer(AbstractEncoder):
         self.max_length = max_length
 
     def forward(self, text):
+        import pdb; pdb.set_trace()
         batch_encoding = self.tokenizer(text, truncation=True, max_length=self.max_length, return_length=True,
                                         return_overflowing_tokens=False, padding="max_length", return_tensors="pt")
         tokens = batch_encoding["input_ids"].to(self.device)
@@ -102,6 +106,68 @@ class BERTEmbedder(AbstractEncoder):
         # output of length 77
         return self(text)
 
+
+class GPTTokenizer(AbstractEncoder):
+    """Uses a pretrained GPT-2 tokenizer by huggingface."""
+    def __init__(self, device="cuda", vq_interface=True, max_length=1024):
+        super().__init__()
+        from transformers import AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        self.device = device
+        self.vq_interface = vq_interface
+        self.max_length = max_length
+
+    def forward(self, text):
+        #import pdb; pdb.set_trace()
+        batch_encoding = self.tokenizer(text, truncation=True, max_length=self.max_length, 
+                                      return_length=True, return_overflowing_tokens=False, 
+                                      return_tensors="pt")
+        tokens = batch_encoding["input_ids"].to(self.device)
+        return tokens
+
+    @torch.no_grad()
+    def encode(self, text):
+        tokens = self(text)
+        if not self.vq_interface:
+            return tokens
+        return None, None, [None, None, tokens]
+
+    def decode(self, text):
+        return text
+
+
+class GPTEmbedder(AbstractEncoder):
+    """Uses the GPT-2 model and adds transformer encoder layers"""
+    def __init__(self, n_embed, n_layer, vocab_size=50257, max_seq_len=1024,
+                 device="cuda", use_tokenizer=True, embedding_dropout=0.0):
+        super().__init__()
+        from transformers import AutoModelForCausalLM
+        
+        self.use_tknz_fn = use_tokenizer
+        if self.use_tknz_fn:
+            self.tknz_fn = GPTTokenizer(vq_interface=False, max_length=max_seq_len)
+        
+        self.device = device
+        # Load pretrained GPT-2 model
+        self.gpt = AutoModelForCausalLM.from_pretrained("gpt2")
+            
+
+    def forward(self, text):
+        #import pdb; pdb.set_trace()
+        if self.use_tknz_fn:
+            tokens = self.tknz_fn(text)
+        else:
+            tokens = text
+            
+        # Get GPT-2 encoded top layer hidden states
+        outputs = self.gpt(tokens, output_hidden_states=True)
+        # Get the last hidden states (top layer)
+        z = outputs.hidden_states[-1]
+        return z
+
+    def encode(self, text):
+        # output of length 77
+        return self(text)
 
 class SpatialRescaler(nn.Module):
     def __init__(self,
