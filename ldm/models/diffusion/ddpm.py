@@ -677,11 +677,21 @@ class LatentDiffusion(DDPM):
         input = rearrange(image_sequence, 'b l h w c -> l b c h w')
 
         #we need to encode each image in the sequence l before concat.
+        def process_object(obj):
+            """
+            Checks if the class name of an object contains the string 'Distribution'.
+            If so, returns obj.sample(), otherwise returns the object itself.
+            """
+            if "Distribution" in obj.__class__.__name__:
+                return obj.sample()
+            return obj
+
         for img in input:
             img = img.to(self.device) # b c h w
 
             img = img.to(memory_format=torch.contiguous_format).float()
             img = self.encode_first_stage(img)
+            img = process_object(img)
             enc_sequence.append(img)
 
         c[k] = torch.cat(enc_sequence, dim=1) #concat all the latents together on the channel dim
