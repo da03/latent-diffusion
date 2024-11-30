@@ -5,8 +5,9 @@ https://github.com/openai/improved-diffusion/blob/e94489283bb876ac1477d5dd7709bb
 https://github.com/CompVis/taming-transformers
 -- merci
 """
-
+import os
 import torch
+import random
 import torch.nn as nn
 import numpy as np
 import pytorch_lightning as pl
@@ -24,7 +25,6 @@ from ldm.modules.distributions.distributions import normal_kl, DiagonalGaussianD
 from ldm.models.autoencoder import VQModelInterface, IdentityFirstStage, AutoencoderKL
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler
-
 
 __conditioning_keys__ = {'concat': 'c_concat',
                          'crossattn': 'c_crossattn',
@@ -1282,8 +1282,14 @@ class LatentDiffusion(DDPM):
     def sample(self, cond, batch_size=16, return_intermediates=False, x_T=None,
                verbose=True, timesteps=None, quantize_denoised=False,
                mask=None, x0=None, shape=None,**kwargs):
+        if shape is None and self.image_size is not None:
+            # Support tuple image_size
+            if isinstance(self.image_size, (tuple, list)):
+                shape = (batch_size, self.channels, *self.image_size)
+            else:
+                shape = (batch_size, self.channels, self.image_size, self.image_size)
         if shape is None:
-            shape = (batch_size, self.channels, self.image_size, self.image_size)
+            raise ValueError("Either shape or self.image_size must be specified")
         if cond is not None:
             if isinstance(cond, dict):
                 cond = {key: cond[key][:batch_size] if not isinstance(cond[key], list) else
