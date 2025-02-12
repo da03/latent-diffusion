@@ -429,6 +429,7 @@ class LatentDiffusion(DDPM):
                  first_stage_config,
                  cond_stage_config,
                  num_timesteps_cond=None,
+                 scheduler_sampling_rate=0,
                  cond_stage_key="image",
                  cond_stage_trainable=False,
                  concat_mode=True,
@@ -444,8 +445,9 @@ class LatentDiffusion(DDPM):
         # for backwards compatibility after implementation of DiffusionWrapper
         if conditioning_key is None:
             conditioning_key = 'concat' if concat_mode else 'crossattn'
-        if cond_stage_config == '__is_unconditional__':
-            conditioning_key = None
+        #if cond_stage_config == '__is_unconditional__':
+        #    conditioning_key = None
+        self.cond_stage_config = cond_stage_config
         ckpt_path = kwargs.pop("ckpt_path", None)
         ignore_keys = kwargs.pop("ignore_keys", [])
         super().__init__(conditioning_key=conditioning_key, *args, **kwargs)
@@ -1531,7 +1533,10 @@ class DiffusionWrapper(pl.LightningModule):
             # print(len(c_crossattn))
             # print(len(c_crossattn[0]))
             # print(len(c_crossattn[0][0]))
-            cc = torch.cat(c_crossattn, 1)
+            if c_crossattn is not None:
+                cc = torch.cat(c_crossattn, 1)
+            else:
+                cc = None
             # print('cattnaaaa', cc.shape)
             out = self.diffusion_model(x, t, context=cc)
         elif self.conditioning_key == 'hybrid':
@@ -1543,7 +1548,8 @@ class DiffusionWrapper(pl.LightningModule):
             # print("HYBRID CALLED", xc.shape)
             # print(c_crossattn[0].shape)
             # print(c_crossattn.__class__)
-            cc = c_crossattn #torch.tensor(c_crossattn) # torch.cat(c_crossattn, 1)
+            #cc = c_crossattn #torch.tensor(c_crossattn) # torch.cat(c_crossattn, 1)
+            cc = c_crossattn # torch.cat(c_crossattn, 1)
             # print("yeye ", cc.shape)
             out = self.diffusion_model(xc, t, context=cc)
         elif self.conditioning_key == 'adm':
