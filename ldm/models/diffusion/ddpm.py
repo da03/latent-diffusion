@@ -717,7 +717,7 @@ class LatentDiffusion(DDPM):
         encoder_posterior = self.encode_first_stage(x)
         z = self.get_first_stage_encoding(encoder_posterior).detach()
 
-        if self.model.conditioning_key is not None:
+        if (self.model.conditioning_key is not None) and (self.cond_stage_config != '__is_unconditional__'):
             if cond_key is None:
                 cond_key = self.cond_stage_key
             if cond_key != self.first_stage_key:
@@ -1289,7 +1289,7 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def sample(self, cond, batch_size=16, return_intermediates=False, x_T=None,
                verbose=True, timesteps=None, quantize_denoised=False,
-               mask=None, x0=None, shape=None,**kwargs):
+               mask=None, x0=None, shape=None, **kwargs):
         if shape is None and self.image_size is not None:
             # Support tuple image_size
             if isinstance(self.image_size, (tuple, list)):
